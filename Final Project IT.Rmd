@@ -1,0 +1,148 @@
+---
+title: "Causal Inference Final Projects"
+author: "Huajian Gao"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+subtitle: Number of Books and the Impact of Math Achievement, comparing 4th grade Math Score and 
+          8th grade Math Score
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(kableExtra)
+library(estimatr)
+library(rdrobust)
+library(rddensity)
+library(mice)
+library(mitml)
+library(PSweight)
+library(cobalt)
+library(MatchIt)
+library(WeightIt)
+library(cobalt)
+```
+
+- Treatment `D`: 
+   - `D = 0` represents that there are less than 100 books at home
+   - `D = 1` represents that the there are more than 100 books at home
+   
+- Outcome `y`: math scores in 8th grade compare to math scores in 4th grade
+
+- Pretreatment covariates: 
+  - `Gender` = student gender
+  - `SLLM4` = 4th grade students like learning Math
+  - `SLLM8` = 8th grade students like learning Math
+  - `PE1` = highest level of education of parent A
+  - `PE2` = highest level of education of parent B
+  - `ACCTB` = Internet Use/Access Textbooks
+  - `NHSS` = Number of Study Supports (0 = no own room and internet, 1 = either own room or internet
+            , 2 = both own room and internet)
+
+# Data Input
+```{r, echo = TRUE}
+BMdat <- read.csv("bookmath.csv")
+```
+
+# Missing Value - Multiple Imputation
+```{r, echo = TRUE}
+#Check missing value patter - MAR/MNAR
+md.pattern(BMdat)
+
+mi0 <- mice(data = BMdat, m = 20, maxit = 0, seed = 1234)
+predMat <- mi0$predictorMatrix
+predMat
+
+meth <- mi0$method
+
+# Imputate missing value
+mi20 <- mice(data = BMdat, m = 20, method = meth, predictorMatrix = predMat, maxit = 50, 
+             seed = 1234, printFlag = FALSE)
+plot(mi20)
+densityplot(mi20)
+
+```
+
+# Pool multiple imputation results
+```{r, echo = TRUE}
+# obtain 20 imputed datasets and pool results
+imputedlist <- complete(mi20, action = "all", include = FALSE)
+imps <- as.mitml.list(imputedlist)
+
+```
+
+# Balance Checking using Propensity Score Matching within each imputed dataset between treatment 
+and control groups
+```{r, echo = TRUE}
+  for (i in 1:20) {
+  ps_formula <- formula(D ~ Gender + SLLM4 + as.factor(NHSS) + as.factor(PE1) + as.factor(PE2) + 
+                      as.factor(ACCTB) + SLLM8)
+  ps <- glm(ps_formula, imputedlist[[i]], family = "gaussian")
+  matched_data <- matchit(ps_formula, data = imputedlist[[i]],
+                          distance = "glm",
+                          link = "linear.logit",
+                    replace = TRUE,
+                    caliper = 0.2, std.caliper = TRUE,
+                    ratio = 2,
+                    s.weights = NULL,
+                    approach = 'across',
+                    method = 'nearest')
+  }
+  
+    love.plot(matched_data, limits = c(-.2, .2), thresholds = c(m = .1), binary = "std")
+
+```
+
+# Balance Checking using Propensity Score Weighting within each imputed dataset between treatment and control groups
+```{r, echo = TRUE}
+library(WeightIt)
+
+for (i in 1:20) {
+  ps_formula <- formula(D ~ Gender + SLLM4 + as.factor(NHSS) + as.factor(PE1) + as.factor(PE2) + 
+                      as.factor(ACCTB) + SLLM8)
+  ps <- glm(ps_formula, imputedlist[[i]], family = "gaussian")
+  weighted_data <- weightit(ps_formula, imputedlist[[i]], ethod = "ps", estimand = "ATE", 
+                            weights = ps$weights)
+}
+  
+  love.plot(weighted_data, limits = c(-.2, .2), thresholds = c(m = .1), binary = "std")
+
+```
+According to Rubin's rules (2001), in a balanced dataset, SMD should be close to zero (|SMD| < 0.1), 
+and VR should be close to 1 (4/5 < VR < 5/4). Based on the results shown above, 
+propensity score weighting may provide a better balance. Therefore, the rest of the analysis will be
+based on Propensity Score Weighting.
+
+# Propensity Score Weighting within each imputed dataset
+```{r, echo = TRUE}
+psmi <- with.mitml.list(imps, {
+  df <- data.frame(y, D, Gender, SLLM4, NHSS, PE1, PE2, ACCTB, SLLM8)
+  ate <- PSweight(data = df, ps.formula = D ~ Gender + SLLM4 + as.factor (NHSS) + as.factor (PE1) +
+                    as.factor (PE2) + as.factor (ACCTB) + SLLM8,
+                  yname = "y", weight = "IPW")
+
+  # Extract the estimates and standard error
+  summary(ate)$estimates[1, c("Estimate", "Std.Error")]
+})
+```
+
+# Calculate average treatment effect
+```{r, echo = TRUE}
+# Pooled the multiple sets of ATE estimates
+qhats <- lapply(psmi, function(x){x["Estimate"]})
+uhats <- lapply(psmi, function(x){
+  (x["Std.Error"])^2
+})
+
+ate.mi <- testEstimates(qhat = qhats, uhat = uhats)
+ate.mi
+```
+According to the results (p < .05), there are significant differences between the groups. Therefore,
+we can reach a conclusion that number of books at home has causal effect on the Math grades at 8th
+grade.
+
